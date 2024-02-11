@@ -1,5 +1,7 @@
 package com.example.musicplayer
 
+import android.media.browse.MediaBrowser
+import android.net.Uri
 import android.os.Bundle
 import android.service.controls.Control
 import androidx.activity.ComponentActivity
@@ -18,6 +20,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -42,10 +46,12 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.contentColorFor
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -55,16 +61,21 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.modifier.modifierLocalConsumer
 import androidx.compose.ui.modifier.modifierLocalMapOf
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.fontscaling.MathUtils.lerp
 import androidx.compose.ui.unit.sp
+import androidx.media3.common.MediaItem
+import androidx.media3.exoplayer.ExoPlayer
 import com.example.musicplayer.ui.theme.MusicPlayerTheme
 import com.google.accompanist.systemuicontroller.rememberSystemUiController
 import kotlinx.coroutines.delay
@@ -72,9 +83,13 @@ import java.nio.file.WatchEvent
 import kotlin.math.absoluteValue
 
 class MainActivity : ComponentActivity() {
+
+    lateinit var player: ExoPlayer
+
     @OptIn(ExperimentalFoundationApi::class, ExperimentalAnimationApi::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        player = ExoPlayer.Builder(this).build()
         setContent {
             MusicPlayerTheme {
                 // A surface container using the 'background' color from the theme
@@ -156,8 +171,55 @@ class MainActivity : ComponentActivity() {
 
                     val pagerState = rememberPagerState(pageCount = { musics.count() })
                     val playingIndex = remember { mutableIntStateOf(0) }
+
                     LaunchedEffect(pagerState.currentPage) {
                         playingIndex.value = pagerState.currentPage
+                        player.seekTo(pagerState.currentPage, 0)
+                    }
+
+                    LaunchedEffect(Unit) {
+                        musics.forEach {
+                            val path = "android.resourse://" + packageName + "/" + it.music
+                            val mediaItem = MediaItem.fromUri(Uri.parse(path))
+                            player.addMediaItem(mediaItem)
+                        }
+                    }
+
+                    player.prepare()
+
+                    val playing = remember {
+                        mutableStateOf(false)
+                    }
+                    val currentPosition = remember {
+                        mutableLongStateOf(0)
+                    }
+                    val totalDuration = remember {
+                        mutableLongStateOf(0)
+                    }
+                    val progressSize = remember {
+                        mutableStateOf(IntSize(0, 0))
+                    }
+
+                    LaunchedEffect(player.isPlaying) {
+                        playing.value = player.isPlaying
+                    }
+                    LaunchedEffect(player.currentPosition) {
+                        currentPosition.value = player.currentPosition
+                    }
+                    LaunchedEffect(player.duration) {
+                        if (player.duration > 0) {
+                            totalDuration.value = player.duration
+                        }
+                    }
+                    LaunchedEffect(player.currentMediaItemIndex) {
+                        playingIndex.value = player.currentMediaItemIndex
+                        pagerState.animateScrollToPage(playingIndex.value, animationSpec = tween())
+                    }
+                    var percentReacher =
+                        currentPosition.value.toFloat() / (if (totalDuration.value > 0)
+                            totalDuration.value else 0).toFloat()
+                    if (percentReacher.isNaN()) {
+                        percentReacher = 0f
                     }
 
                     Box(
@@ -242,7 +304,7 @@ class MainActivity : ComponentActivity() {
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
-                                    text = "00:00",
+                                    text = convertLongText(totalDuration.value),
                                     modifier = Modifier.width(55.dp),
                                     color = textColor,
                                     textAlign = TextAlign.Center
@@ -257,19 +319,30 @@ class MainActivity : ComponentActivity() {
                                         .clip(
                                             CircleShape
                                         )
-                                        .background(Color.White),
+                                        .background(Color.White)
+                                        .onGloballyPositioned {
+                                            progressSize.value = it.size
+                                        }
+                                        .pointerInput(Unit) {
+                                            detectTapGestures {
+                                                val xPos = it.x
+                                                val whereIClicked =
+                                                    (xPos.toLong() * totalDuration.value) / progressSize.value.width.toLong()
+                                                player.seekTo(whereIClicked)
+                                            }
+                                        },
                                     contentAlignment = Alignment.CenterStart
                                 ) {
                                     Box(
                                         modifier = Modifier
-                                            .fillMaxWidth(fraction = .5f)
+                                            .fillMaxWidth(fraction = if (playing.value) percentReacher else 0f)
                                             .fillMaxHeight()
                                             .clip(RoundedCornerShape(8.dp))
                                             .background(Color(0xff414141))
                                     )
                                 }
                                 Text(
-                                    text = "00:00",
+                                    text = convertLongText(currentPosition.value),
                                     modifier = Modifier.width(55.dp),
                                     color = textColor,
                                     textAlign = TextAlign.Center
@@ -284,14 +357,21 @@ class MainActivity : ComponentActivity() {
                                 horizontalArrangement = Arrangement.SpaceEvenly,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Control(icon =R.drawable.rewind, size =60.dp, onClick = {
-
+                                Control(icon = R.drawable.rewind, size = 60.dp, onClick = {
+                                    player.seekToPreviousMediaItem()
                                 })
-                                Control(icon =R.drawable.pause, size =60.dp, onClick = {
-
-                                })
-                                Control(icon =R.drawable.forwad, size =60.dp, onClick = {
-
+                                Control(
+                                    icon = if (playing.value) R.drawable.pause else R.drawable.play,
+                                    size = 60.dp,
+                                    onClick = {
+                                        if (playing.value) {
+                                            player.pause()
+                                        } else {
+                                            player.play()
+                                        }
+                                    })
+                                Control(icon = R.drawable.forwad, size = 60.dp, onClick = {
+                                    player.seekToNextMediaItem()
                                 })
                             }
                         }
@@ -320,6 +400,25 @@ fun Control(icon: Int, size: Dp, onClick: () -> Unit) {
             contentDescription = null
         )
     }
+}
+
+fun convertLongText(long: Long): String {
+    val sec = long / 1000
+    val minute = sec / 60
+    val second = sec % 60
+
+    val minutesString = if (minute < 10) {
+        "0${minute}"
+    } else {
+        minute.toString()
+    }
+
+    val secondString = if (second < 10) {
+        "0${second}"
+    } else {
+        second.toString()
+    }
+    return "$minutesString:$secondString"
 }
 
 data class Music(
